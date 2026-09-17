@@ -612,7 +612,7 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
 }
 .annotate-toolbar{
-  display:flex;align-items:center;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));
+  display:flex;align-items:center;gap:8px;padding:10px 12px 8px;
   background:#111;flex-wrap:wrap;
 }
 .annotate-toolbar .grow{flex:1;}
@@ -622,8 +622,12 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
 }
 .annotate-tool.active{background:#eab308;color:#1a1a1a;}
 .annotate-tool.primary{background:#1d5f8a;color:#fff;}
+.annotate-tool.block{flex:1;justify-content:center;font-size:15px;padding:13px;}
+.annotate-actions{
+  display:flex;gap:10px;padding:0 12px calc(12px + env(safe-area-inset-bottom,0px));background:#111;
+}
 .annotate-top{
-  display:flex;justify-content:space-between;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 8px;
+  display:flex;justify-content:center;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 8px;
   background:#111;color:#e8e6e2;font-size:13px;font-weight:700;
 }
 .annotate-top button{background:none;border:none;color:#e8e6e2;font-size:15px;padding:6px 10px;}
@@ -807,9 +811,7 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
 <!-- 写真注釈(矢印・吹き出し) -->
 <div class="annotate-overlay" id="annotateOverlay" hidden>
   <div class="annotate-top">
-    <button id="btnAnnotateCancel">キャンセル</button>
     <span>写真に書き込み</span>
-    <button id="btnAnnotateSave" style="color:#5aa8d8;font-weight:900;">保存</button>
   </div>
   <div class="annotate-stage" id="annotateStage">
     <canvas id="annotateCanvas"></canvas>
@@ -821,6 +823,10 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
     <button class="annotate-tool" id="toolBubble" data-tool="bubble">💬 吹き出し</button>
     <span class="grow"></span>
     <button class="annotate-tool" id="btnAnnotateUndo">↺ 元に戻す</button>
+  </div>
+  <div class="annotate-actions">
+    <button class="annotate-tool block" id="btnAnnotateCancel">キャンセル</button>
+    <button class="annotate-tool block primary" id="btnAnnotateSave">保存</button>
   </div>
 </div>
 
@@ -869,7 +875,7 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
 </div>
 
 <div class="toast" id="toast"></div>
-<button id="debugToggle">🔍 詳細ログ</button>
+<button id="debugToggle" hidden>🔍 詳細ログ</button>
 <div id="debugPanel" hidden>
   <pre id="debugLogText"></pre>
   <div class="dbg-actions">
