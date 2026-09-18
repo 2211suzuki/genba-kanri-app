@@ -816,7 +816,7 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
   <div class="annotate-stage" id="annotateStage">
     <canvas id="annotateCanvas"></canvas>
   </div>
-  <p class="hint" style="color:#a09a8c;padding:0 14px;margin:0;">吹き出しはタップした位置に配置されます。注釈をタップすると削除できます</p>
+  <p class="hint" style="color:#a09a8c;padding:0 14px;margin:0;">吹き出しはタップした位置に配置されます。注釈はタップで削除、ドラッグで移動できます</p>
   <div class="annotate-toolbar">
     <button class="annotate-tool active" id="toolArrow" data-tool="arrow">↗ 矢印</button>
     <button class="annotate-tool" id="toolPen" data-tool="pen">✏️ 手書き</button>
@@ -1674,7 +1674,17 @@ function openMarkerModal(marker,xr,yr){
   editingMarker=marker;
   editingXr=marker?marker.xr:xr; editingYr=marker?marker.yr:yr;
   // 保存済み写真はArrayBuffer(data)で持っているため、表示用にBlobへ復元する
-  editingPhotos = marker ? marker.photos.map(p=>({id:p.id,blob:new Blob([p.data],{type:"image/jpeg"})})) : [];
+  // raw(元画像)+annotations(注釈データ)を保存済みの写真は再編集可能な状態で復元する。
+  // 旧形式(dataのみ)の写真は、これまで通り注釈が焼き込まれた画像をそのまま表示する。
+  editingPhotos = marker ? marker.photos.map(p=>{
+    const hasRaw=!!p.raw;
+    return {
+      id:p.id,
+      blob:new Blob([hasRaw?p.raw:p.data],{type:"image/jpeg"}),
+      previewBlob:hasRaw?new Blob([p.data],{type:"image/jpeg"}):null,
+      annotations:p.annotations?JSON.parse(JSON.stringify(p.annotations)):[]
+    };
+  }) : [];
   el("markerModalTitle").textContent = marker ? `検査ポイント No.${marker.seq}` : "検査ポイントを追加";
   el("inputContractor").value = marker?(marker.contractor||""):"";
   el("inputComment").value = marker?(marker.comment||""):"";
@@ -1686,7 +1696,7 @@ function openMarkerModal(marker,xr,yr){
 function renderPhotoGrid(){
   const grid=el("photoGrid"); grid.innerHTML="";
   editingPhotos.forEach((p,idx)=>{
-    const url=URL.createObjectURL(p.blob);
+    const url=URL.createObjectURL(p.previewBlob||p.blob);
     const d=document.createElement("div"); d.className="photo-thumb";
     d.innerHTML=`<img src="${url}"><button class="x" data-idx="${idx}">×</button>`;
     d.querySelector("img").addEventListener("click",()=>openAnnotate(idx));
@@ -1701,14 +1711,29 @@ function renderPhotoGrid(){
 /* ============ 写真注釈(矢印・手書き・吹き出し) ============ */
 let annotateIdx=-1, annotateImg=null, annotateImgUrl=null, annotateActions=[], annotateTool="arrow";
 let annotateDragStart=null, annotatePendingBubblePoint=null, annotatePenAction=null;
-let annotateDeleteCandidate=null; // {idx, start, moved} タップで既存注釈を削除するための判定用
+let annotateDeleteCandidate=null; // {idx, start, moved} タップで既存注釈を削除/移動するための判定用
+let annotateMoveOrigin=null; // 移動開始時点での注釈の元の形状(差分計算の基準)
+
+/* 注釈をdx,dyだけ平行移動する。originは移動開始時点のスナップショット(累積誤差を避けるため常にoriginからの差分で計算する) */
+function translateAnnotation(action,origin,dx,dy){
+  if(action.type==="arrow"){
+    action.x1=origin.x1+dx; action.y1=origin.y1+dy;
+    action.x2=origin.x2+dx; action.y2=origin.y2+dy;
+  } else if(action.type==="bubble"){
+    action.x=origin.x+dx; action.y=origin.y+dy;
+  } else if(action.type==="pen"){
+    action.points=origin.points.map(pt=>({x:pt.x+dx,y:pt.y+dy}));
+  }
+}
 
 async function openAnnotate(idx){
   dlog(`写真注釈を開く: idx=${idx}`);
   const p=editingPhotos[idx];
   try{
     const {img,url}=await blobToImageEl(p.blob);
-    annotateIdx=idx; annotateImg=img; annotateImgUrl=url; annotateActions=[];
+    annotateIdx=idx; annotateImg=img; annotateImgUrl=url;
+    // 前回保存した注釈があれば復元し、続けて編集・削除できるようにする
+    annotateActions=JSON.parse(JSON.stringify(p.annotations||[]));
     annotateTool="arrow"; updateAnnotateTools();
     resetAnnotateGestureState();
     const canvas=el("annotateCanvas");
@@ -1836,18 +1861,20 @@ function hitTestAnnotation(p){
   return -1;
 }
 function resetAnnotateGestureState(){
-  annotateDragStart=null; annotatePenAction=null; annotatePendingBubblePoint=null; annotateDeleteCandidate=null;
+  annotateDragStart=null; annotatePenAction=null; annotatePendingBubblePoint=null;
+  annotateDeleteCandidate=null; annotateMoveOrigin=null;
 }
 el("annotateCanvas").addEventListener("pointerdown",(e)=>{
   e.preventDefault();
   const p=annotatePoint(e);
   const hitIdx=hitTestAnnotation(p);
   if(hitIdx>=0){
-    // 既存注釈の上を押した場合はタップでの削除候補として扱い、新規描画は開始しない
+    // 既存注釈の上を押した場合は、動かさず離せば削除確認、ドラッグすれば移動として扱う
     annotateDeleteCandidate={idx:hitIdx,start:p,moved:false};
+    annotateMoveOrigin=JSON.parse(JSON.stringify(annotateActions[hitIdx]));
     return;
   }
-  annotateDeleteCandidate=null;
+  annotateDeleteCandidate=null; annotateMoveOrigin=null;
   if(annotateTool==="arrow"){
     annotateDragStart=p;
   } else if(annotateTool==="pen"){
@@ -1862,9 +1889,16 @@ el("annotateCanvas").addEventListener("pointerdown",(e)=>{
 });
 el("annotateCanvas").addEventListener("pointermove",(e)=>{
   const p=annotatePoint(e);
-  if(annotateDeleteCandidate&&!annotateDeleteCandidate.moved){
-    if(Math.hypot(p.x-annotateDeleteCandidate.start.x,p.y-annotateDeleteCandidate.start.y)>12){
-      annotateDeleteCandidate.moved=true;
+  if(annotateDeleteCandidate){
+    if(!annotateDeleteCandidate.moved){
+      if(Math.hypot(p.x-annotateDeleteCandidate.start.x,p.y-annotateDeleteCandidate.start.y)>12){
+        annotateDeleteCandidate.moved=true;
+      }
+    }
+    if(annotateDeleteCandidate.moved){
+      const dx=p.x-annotateDeleteCandidate.start.x, dy=p.y-annotateDeleteCandidate.start.y;
+      translateAnnotation(annotateActions[annotateDeleteCandidate.idx],annotateMoveOrigin,dx,dy);
+      redrawAnnotate();
     }
     return;
   }
@@ -1883,8 +1917,11 @@ el("annotateCanvas").addEventListener("pointerup",(e)=>{
       actionSheet([
         {label:"この注釈を削除",danger:true,onSelect:()=>{ annotateActions.splice(idx,1); redrawAnnotate(); }},
       ]);
+    } else {
+      dlog(`注釈を移動: idx=${annotateDeleteCandidate.idx}`);
+      toast("注釈の位置を移動しました");
     }
-    annotateDeleteCandidate=null;
+    annotateDeleteCandidate=null; annotateMoveOrigin=null;
     return;
   }
   if(annotateTool==="arrow"&&annotateDragStart){
@@ -1927,8 +1964,10 @@ el("btnAnnotateSave").addEventListener("click",()=>{
   const canvas=el("annotateCanvas");
   canvas.toBlob((blob)=>{
     if(blob&&annotateIdx>=0){
-      editingPhotos[annotateIdx]={id:editingPhotos[annotateIdx].id, blob};
-      dlog(`写真注釈を保存: idx=${annotateIdx} size=${blob.size}`);
+      // 元画像(blob)は上書きしない。注釈済みのプレビューと、再編集用の注釈データを別々に保持する。
+      editingPhotos[annotateIdx].previewBlob=blob;
+      editingPhotos[annotateIdx].annotations=JSON.parse(JSON.stringify(annotateActions));
+      dlog(`写真注釈を保存: idx=${annotateIdx} annotations=${annotateActions.length} size=${blob.size}`);
       renderPhotoGrid();
     }
     closeAnnotate();
@@ -1937,17 +1976,23 @@ el("btnAnnotateSave").addEventListener("click",()=>{
 
 el("btnTakePhoto").addEventListener("click",()=>el("fileCamera").click());
 el("btnPickPhoto").addEventListener("click",()=>el("fileLibrary").click());
-async function addPhotosFromInput(input){
+async function addPhotosFromInput(input,opts){
   const files=[...input.files]; input.value="";
+  const addedIdx=[];
   for(const f of files){
     try{
       const blob=await downscaleImage(f,1600,0.82);
-      editingPhotos.push({id:uid(),blob});
+      editingPhotos.push({id:uid(),blob,annotations:[]});
+      addedIdx.push(editingPhotos.length-1);
     }catch(e){}
   }
   renderPhotoGrid();
+  // 撮影直後は、そのまま書き込み(注釈)画面を開く
+  if(opts&&opts.autoAnnotate&&addedIdx.length){
+    openAnnotate(addedIdx[0]);
+  }
 }
-el("fileCamera").addEventListener("change",(e)=>addPhotosFromInput(e.target));
+el("fileCamera").addEventListener("change",(e)=>addPhotosFromInput(e.target,{autoAnnotate:true}));
 el("fileLibrary").addEventListener("change",(e)=>addPhotosFromInput(e.target));
 
 el("btnSaveMarker").addEventListener("click",async()=>{
@@ -1956,7 +2001,18 @@ el("btnSaveMarker").addEventListener("click",async()=>{
   try{
     dlog(`マーカー保存開始: 業者=${contractor||"(未設定)"} 写真${editingPhotos.length}枚`);
     // 保存直前にBlob→ArrayBufferへ変換(iOSでBlobを直接IndexedDBに保存できない不具合の回避)
-    const photosForStore=await Promise.all(editingPhotos.map(async p=>({id:p.id,data:await p.blob.arrayBuffer()})));
+    // 注釈がある写真は「元画像(raw)+注釈データ(annotations)」を別々に保存し、後から再編集できるようにする。
+    // 注釈がない写真は従来通りdataのみ保存する(容量節約)。
+    const photosForStore=await Promise.all(editingPhotos.map(async p=>{
+      const hasAnnotations=p.annotations&&p.annotations.length>0;
+      const flattened=p.previewBlob||p.blob;
+      const data=await flattened.arrayBuffer();
+      if(hasAnnotations){
+        const raw=await p.blob.arrayBuffer();
+        return {id:p.id,data,raw,annotations:p.annotations};
+      }
+      return {id:p.id,data};
+    }));
     if(editingMarker){
       editingMarker.contractor=contractor; editingMarker.comment=comment; editingMarker.photos=photosForStore;
       await idbPut("markers",editingMarker);
