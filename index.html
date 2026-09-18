@@ -1866,6 +1866,9 @@ function resetAnnotateGestureState(){
 }
 el("annotateCanvas").addEventListener("pointerdown",(e)=>{
   e.preventDefault();
+  // iOS Safariでは指がcanvasの表示範囲からわずかに外れるとpointermove/upが
+  // 届かなくなることがあるため、明示的にポインタを捕捉して範囲外でも追跡できるようにする
+  try{ e.currentTarget.setPointerCapture(e.pointerId); }catch(err){}
   const p=annotatePoint(e);
   const hitIdx=hitTestAnnotation(p);
   if(hitIdx>=0){
@@ -1911,6 +1914,7 @@ el("annotateCanvas").addEventListener("pointermove",(e)=>{
   }
 });
 el("annotateCanvas").addEventListener("pointerup",(e)=>{
+  try{ e.currentTarget.releasePointerCapture(e.pointerId); }catch(err){}
   if(annotateDeleteCandidate){
     if(!annotateDeleteCandidate.moved){
       const idx=annotateDeleteCandidate.idx;
@@ -1939,6 +1943,21 @@ el("annotateCanvas").addEventListener("pointerup",(e)=>{
     annotatePenAction=null;
     redrawAnnotate();
   }
+});
+el("annotateCanvas").addEventListener("pointercancel",(e)=>{
+  // OS側のジェスチャー割り込みなどでpointerupが来ない場合の後始末。
+  // 移動中だった注釈はその時点の位置のまま確定させ、削除確認は出さない。
+  try{ e.currentTarget.releasePointerCapture(e.pointerId); }catch(err){}
+  annotateDeleteCandidate=null; annotateMoveOrigin=null;
+  annotateDragStart=null;
+  if(annotatePenAction){
+    if(annotatePenAction.points.length<2){
+      const idx=annotateActions.indexOf(annotatePenAction);
+      if(idx>=0) annotateActions.splice(idx,1);
+    }
+    annotatePenAction=null;
+  }
+  redrawAnnotate();
 });
 el("toolArrow").addEventListener("click",()=>{ annotateTool="arrow"; updateAnnotateTools(); });
 el("toolPen").addEventListener("click",()=>{ annotateTool="pen"; updateAnnotateTools(); });
