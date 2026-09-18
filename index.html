@@ -606,9 +606,9 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
 .annotate-overlay{
   position:fixed;inset:0;background:#000;z-index:300;display:flex;flex-direction:column;
 }
-.annotate-stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;}
+.annotate-stage{flex:1;position:relative;overflow:hidden;touch-action:none;}
 .annotate-stage canvas{
-  max-width:100%;max-height:100%;touch-action:none;
+  position:absolute;left:0;top:0;transform-origin:0 0;touch-action:none;
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
 }
 .annotate-toolbar{
@@ -816,7 +816,7 @@ h2.section{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.04e
   <div class="annotate-stage" id="annotateStage">
     <canvas id="annotateCanvas"></canvas>
   </div>
-  <p class="hint" style="color:#a09a8c;padding:0 14px;margin:0;">吹き出しはタップした位置に配置されます。注釈はタップで削除、ドラッグで移動できます</p>
+  <p class="hint" style="color:#a09a8c;padding:0 14px;margin:0;">吹き出しはタップした位置に配置されます。注釈はタップで削除、ドラッグで移動できます。2本指のピンチで拡大・縮小できます</p>
   <div class="annotate-toolbar">
     <button class="annotate-tool active" id="toolArrow" data-tool="arrow">↗ 矢印</button>
     <button class="annotate-tool" id="toolPen" data-tool="pen">✏️ 手書き</button>
@@ -1614,7 +1614,10 @@ el("btnZoomReset").addEventListener("click",()=>setZoom(1));
 
 el("btnPrevPage").addEventListener("click",()=>{ if(livePage>1){ livePage--; renderCanvasPage(); } });
 el("btnNextPage").addEventListener("click",()=>{ if(livePage<liveDrawing.numPages){ livePage++; renderCanvasPage(); } });
-window.addEventListener("resize",()=>{ if(current().screen==="canvas"&&liveDoc) renderCanvasPage(); });
+window.addEventListener("resize",()=>{
+  if(current().screen==="canvas"&&liveDoc) renderCanvasPage();
+  if(!el("annotateOverlay").hidden&&annotateImg) annotateFitToStage();
+});
 
 function renderMarkerList(){
   const wrap=el("markerList");
@@ -1714,6 +1717,36 @@ let annotateDragStart=null, annotatePendingBubblePoint=null, annotatePenAction=n
 let annotateDeleteCandidate=null; // {idx, start, moved} タップで既存注釈を削除/移動するための判定用
 let annotateMoveOrigin=null; // 移動開始時点での注釈の元の形状(差分計算の基準)
 
+/* ---- 注釈画面での拡大縮小・パン(ピンチズーム) ---- */
+let annotateZoom=1, annotatePanX=0, annotatePanY=0, annotateBaseCssW=0, annotateBaseCssH=0;
+const ANNOTATE_ZOOM_MIN=1, ANNOTATE_ZOOM_MAX=4;
+const annotateActivePointers=new Map();
+let annotatePinch=null; // {startDist,startZoom,contentAnchorX,contentAnchorY}
+
+function annotateDist(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function annotateMid(a,b){ return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
+function annotateClampPan(){
+  const wrap=el("annotateStage");
+  const ww=wrap.clientWidth, wh=wrap.clientHeight;
+  const cw=annotateBaseCssW*annotateZoom, ch=annotateBaseCssH*annotateZoom;
+  annotatePanX = cw<=ww ? (ww-cw)/2 : Math.min(0,Math.max(ww-cw,annotatePanX));
+  annotatePanY = ch<=wh ? (wh-ch)/2 : Math.min(0,Math.max(wh-ch,annotatePanY));
+}
+function annotateApplyTransform(){
+  el("annotateCanvas").style.transform=`translate(${annotatePanX}px,${annotatePanY}px) scale(${annotateZoom})`;
+}
+/* 表示中の写真を、注釈ステージの実寸に収まるサイズ(等倍以下)で再フィットし、拡大率をリセットする */
+function annotateFitToStage(){
+  const canvas=el("annotateCanvas");
+  const stage=el("annotateStage");
+  const sw=stage.clientWidth||360, sh=stage.clientHeight||480;
+  const fitScale=Math.min(sw/canvas.width, sh/canvas.height, 1);
+  annotateBaseCssW=canvas.width*fitScale; annotateBaseCssH=canvas.height*fitScale;
+  canvas.style.width=annotateBaseCssW+"px"; canvas.style.height=annotateBaseCssH+"px";
+  annotateZoom=1; annotatePanX=0; annotatePanY=0;
+  annotateClampPan(); annotateApplyTransform();
+}
+
 /* 注釈をdx,dyだけ平行移動する。originは移動開始時点のスナップショット(累積誤差を避けるため常にoriginからの差分で計算する) */
 function translateAnnotation(action,origin,dx,dy){
   if(action.type==="arrow"){
@@ -1738,8 +1771,10 @@ async function openAnnotate(idx){
     resetAnnotateGestureState();
     const canvas=el("annotateCanvas");
     canvas.width=img.naturalWidth||800; canvas.height=img.naturalHeight||600;
-    redrawAnnotate();
+    // ステージの実寸(clientWidth/Height)は非表示中は0になるため、表示してから測る
     showOverlay("annotateOverlay");
+    annotateFitToStage();
+    redrawAnnotate();
   }catch(err){
     dlog(`写真注釈オープンエラー: ${err&&err.message}`);
     toast("写真を開けませんでした");
@@ -1863,12 +1898,44 @@ function hitTestAnnotation(p){
 function resetAnnotateGestureState(){
   annotateDragStart=null; annotatePenAction=null; annotatePendingBubblePoint=null;
   annotateDeleteCandidate=null; annotateMoveOrigin=null;
+  annotateActivePointers.clear(); annotatePinch=null;
 }
-el("annotateCanvas").addEventListener("pointerdown",(e)=>{
-  e.preventDefault();
+/* 単指(描画/移動/削除判定)の途中状態だけを打ち切る。2本指ピンチへの切り替わり時と
+   pointercancel時に使う。未確定の手書きストロークは破棄し、それ以外は特に何もしない
+   (矢印ドラッグ中プレビューや移動中の注釈は、そこまでの状態のまま確定させる)。 */
+function annotateCancelSingleGesture(){
+  annotateDeleteCandidate=null; annotateMoveOrigin=null;
+  annotateDragStart=null;
+  if(annotatePenAction){
+    if(annotatePenAction.points.length<2){
+      const idx=annotateActions.indexOf(annotatePenAction);
+      if(idx>=0) annotateActions.splice(idx,1);
+    }
+    annotatePenAction=null;
+  }
+  redrawAnnotate();
+}
+el("annotateStage").addEventListener("pointerdown",(e)=>{
   // iOS Safariでは指がcanvasの表示範囲からわずかに外れるとpointermove/upが
   // 届かなくなることがあるため、明示的にポインタを捕捉して範囲外でも追跡できるようにする
   try{ e.currentTarget.setPointerCapture(e.pointerId); }catch(err){}
+  annotateActivePointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(annotateActivePointers.size===2){
+    // 2本指になったら単指の描画/移動操作は打ち切り、ピンチズーム/パンに切り替える
+    e.preventDefault();
+    annotateCancelSingleGesture();
+    const pts=[...annotateActivePointers.values()];
+    const stageRect=el("annotateStage").getBoundingClientRect();
+    const localPts=pts.map(pt=>({x:pt.x-stageRect.left,y:pt.y-stageRect.top}));
+    const m=annotateMid(localPts[0],localPts[1]);
+    annotatePinch={
+      startDist:annotateDist(pts[0],pts[1]), startZoom:annotateZoom,
+      contentAnchorX:(m.x-annotatePanX)/annotateZoom, contentAnchorY:(m.y-annotatePanY)/annotateZoom
+    };
+    return;
+  }
+  if(annotateActivePointers.size>2) return; // 3本目以降は無視
+  e.preventDefault();
   const p=annotatePoint(e);
   const hitIdx=hitTestAnnotation(p);
   if(hitIdx>=0){
@@ -1890,7 +1957,21 @@ el("annotateCanvas").addEventListener("pointerdown",(e)=>{
     setTimeout(()=>el("bubbleTextInput").focus(),80);
   }
 });
-el("annotateCanvas").addEventListener("pointermove",(e)=>{
+el("annotateStage").addEventListener("pointermove",(e)=>{
+  if(!annotateActivePointers.has(e.pointerId)) return;
+  annotateActivePointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(annotatePinch&&annotateActivePointers.size===2){
+    const pts=[...annotateActivePointers.values()];
+    const newDist=annotateDist(pts[0],pts[1]);
+    const stageRect=el("annotateStage").getBoundingClientRect();
+    const localPts=pts.map(pt=>({x:pt.x-stageRect.left,y:pt.y-stageRect.top}));
+    const m=annotateMid(localPts[0],localPts[1]);
+    annotateZoom=Math.max(ANNOTATE_ZOOM_MIN,Math.min(ANNOTATE_ZOOM_MAX,annotatePinch.startZoom*(newDist/annotatePinch.startDist)));
+    annotatePanX=m.x-annotatePinch.contentAnchorX*annotateZoom; annotatePanY=m.y-annotatePinch.contentAnchorY*annotateZoom;
+    annotateClampPan(); annotateApplyTransform();
+    return;
+  }
+  if(annotateActivePointers.size>1) return;
   const p=annotatePoint(e);
   if(annotateDeleteCandidate){
     if(!annotateDeleteCandidate.moved){
@@ -1913,8 +1994,11 @@ el("annotateCanvas").addEventListener("pointermove",(e)=>{
     redrawAnnotate();
   }
 });
-el("annotateCanvas").addEventListener("pointerup",(e)=>{
+el("annotateStage").addEventListener("pointerup",(e)=>{
   try{ e.currentTarget.releasePointerCapture(e.pointerId); }catch(err){}
+  annotateActivePointers.delete(e.pointerId);
+  if(annotateActivePointers.size<2) annotatePinch=null;
+  if(annotateActivePointers.size>0) return; // 2本指の片方を離しただけの場合はここで終える
   if(annotateDeleteCandidate){
     if(!annotateDeleteCandidate.moved){
       const idx=annotateDeleteCandidate.idx;
@@ -1944,20 +2028,13 @@ el("annotateCanvas").addEventListener("pointerup",(e)=>{
     redrawAnnotate();
   }
 });
-el("annotateCanvas").addEventListener("pointercancel",(e)=>{
+el("annotateStage").addEventListener("pointercancel",(e)=>{
   // OS側のジェスチャー割り込みなどでpointerupが来ない場合の後始末。
   // 移動中だった注釈はその時点の位置のまま確定させ、削除確認は出さない。
   try{ e.currentTarget.releasePointerCapture(e.pointerId); }catch(err){}
-  annotateDeleteCandidate=null; annotateMoveOrigin=null;
-  annotateDragStart=null;
-  if(annotatePenAction){
-    if(annotatePenAction.points.length<2){
-      const idx=annotateActions.indexOf(annotatePenAction);
-      if(idx>=0) annotateActions.splice(idx,1);
-    }
-    annotatePenAction=null;
-  }
-  redrawAnnotate();
+  annotateActivePointers.delete(e.pointerId);
+  if(annotateActivePointers.size<2) annotatePinch=null;
+  annotateCancelSingleGesture();
 });
 el("toolArrow").addEventListener("click",()=>{ annotateTool="arrow"; updateAnnotateTools(); });
 el("toolPen").addEventListener("click",()=>{ annotateTool="pen"; updateAnnotateTools(); });
